@@ -7,18 +7,25 @@ TARGET = client
 SRC = client.c # Assuming your source file is named client.c. Change this as needed.
 OBJ = $(SRC:.c=.o)
 
-# Default target
-all: $(TARGET)
+# All targets
+all: client server
 
-$(TARGET): $(OBJ)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LIBS)
+# Target for client
+client: client.o
+	$(CC) $(CFLAGS) -o client client.o $(LIBS)
 
-%.o: %.c
-	$(CC) $(CFLAGS) -c -o $@ $<
+client.o: client.c
+	$(CC) $(CFLAGS) -c client.c
 
-# Clean target
+# Target for server
+server: server.o
+	$(CC) $(CFLAGS) -o server server.o $(LIBS)
+
+server.o: server.c
+	$(CC) $(CFLAGS) -c server.c
+
+# Clean up
 clean:
-	rm -f $(OBJ) $(TARGET)
+	rm -f client server *.o
 
-# Phony targets
 .PHONY: all clean

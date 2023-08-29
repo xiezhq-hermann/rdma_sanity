@@ -12,9 +12,10 @@
 #include <sys/time.h> /* for struct timeval */
 
 #include <unistd.h>
-
-// #include "async.h"
-// #include "async_private.h"
+#include <stdlib.h>
+#include <stdio.h>
+#include <stdbool.h>
+#include <fcntl.h>
 
 #define MIN(a, b) (a) < (b) ? a : b
 #define RDMA_MAX_SGE 128
@@ -38,6 +39,9 @@ typedef struct redisContext
   int err;          /* Error flags, 0 when there is no error */
   char errstr[128]; /* String representation of error when applicable */
 
+  // a single flag indicating the connection status
+  int flags;
+
   char *obuf;       /* Write buffer */
   size_t obuf_size; /* Size of write buffer */
 
@@ -47,10 +51,6 @@ typedef struct redisContext
     char *source_addr;
     int port;
   } tcp;
-
-  /* For non-blocking connect */
-  // struct sockadr *saddr;
-  // size_t addrlen;
 
   void *privctx;
 
@@ -122,6 +122,7 @@ void __redisSetError(redisContext *c, int type, const char *str)
     // assert(type == REDIS_ERR_IO);
     strerror_r(errno, c->errstr, sizeof(c->errstr));
   }
+  printf("error: %s\n", c->errstr);
 }
 
 static size_t rdmaPostSend(RdmaContext *ctx, struct rdma_cm_id *cm_id,
@@ -347,7 +348,6 @@ pollcq:
     {
       return -1;
     }
-    printf("sent %d bytes, id %d\n", wc.byte_len, wc.wr_id);
     break;
   default:
     __redisSetError(c, REDIS_ERR_OTHER, "RDMA: unexpected opcode");
@@ -362,7 +362,7 @@ pollcq:
 static ssize_t redisRdmaRead(redisContext *c, char *buf, size_t bufcap)
 {
   RdmaContext *ctx = (RdmaContext *)c->privctx;
-  struct rdma_cm_id *cm_id = ctx->cm_id;
+  // struct rdma_cm_id *cm_id = ctx->cm_id;
   uint32_t toread;
 
   if (ctx->outstanding_msg_size > 0)
@@ -497,9 +497,9 @@ static int redisRdmaEstablished(redisContext *c, struct rdma_cm_id *cm_id)
   RdmaContext *ctx = (RdmaContext *)c->privctx;
 
   /* it's time to tell redis we have already connected */
-  // c->flags |= REDIS_CONNECTED;
+  c->flags |= REDIS_CONNECTED;
   // c->funcs = &redisContextRdmaFuncs;
-  // // todo, will a Null fd crash the program?
+  // todo, will a Null fd crash the program?
   // c->fd = -1;
 
   printf("connection established\n");
@@ -595,10 +595,10 @@ static int redisRdmaWaitConn(redisContext *c, long timeout)
       return REDIS_ERR;
     }
 
-    // if (c->flags & REDIS_CONNECTED)
-    // {
-    //   return REDIS_OK;
-    // }
+    if (c->flags & REDIS_CONNECTED)
+    {
+      return REDIS_OK;
+    }
 
     now = redisNowMs();
   }
@@ -636,30 +636,6 @@ int redisContextConnectRdma(redisContext *c, const char *addr, int port,
     }
   }
 
-  // if (timeout)
-  // {
-  //   if (redisContextUpdateConnectTimeout(c, timeout) == REDIS_ERR)
-  //   {
-  //     __redisSetError(c, REDIS_ERR_OOM, "RDMA: Out of memory");
-  //     return REDIS_ERR;
-  //   }
-  // }
-  // else
-  // {
-  //   free(c->connect_timeout);
-  //   c->connect_timeout = NULL;
-  // }
-
-  // if (redisContextTimeoutMsec(c, &timeout_msec) != REDIS_OK)
-  // {
-  //   __redisSetError(c, REDIS_ERR_IO, "RDMA: Invalid timeout specified");
-  //   return REDIS_ERR;
-  // }
-  // else if (timeout_msec == -1)
-  // {
-  //   timeout_msec = INT_MAX;
-  // }
-
   snprintf(_port, 6, "%d", port);
   memset(&hints, 0, sizeof(hints));
   hints.ai_family = AF_INET;
@@ -676,7 +652,7 @@ int redisContextConnectRdma(redisContext *c, const char *addr, int port,
   }
 
   // ctx = hi_calloc(sizeof(RdmaContext), 1);
-  ctx = calloc(sizeof(RdmaContext));
+  ctx = calloc(1, sizeof(RdmaContext));
   if (!ctx)
   {
     __redisSetError(c, REDIS_ERR_OOM, "Out of memory");
@@ -709,6 +685,10 @@ int redisContextConnectRdma(redisContext *c, const char *addr, int port,
   //   goto free_rdma;
   // }
 
+  // make it non-blocking
+  int flags = fcntl(cm_channel->fd, F_GETFL, 0);
+  fcntl(cm_channel->fd, F_SETFL, flags | O_NONBLOCK);
+
   for (p = servinfo; p != NULL; p = p->ai_next)
   {
     if (p->ai_family == PF_INET)
@@ -736,8 +716,7 @@ int redisContextConnectRdma(redisContext *c, const char *addr, int port,
 
     // note: no timeout specified, negative number means large enough
     timed = timeout_msec - (redisNowMs() - start);
-    if ((redisRdmaWaitConn(c, timed) == REDIS_OK) &&
-        (c->flags & REDIS_CONNECTED))
+    if (redisRdmaWaitConn(c, 50) == REDIS_OK) //&& (c->flags & REDIS_CONNECTED))
     {
       ret = REDIS_OK;
       printf("rdma connect success\n");
@@ -774,4 +753,62 @@ end:
   }
 
   return ret;
+}
+
+static void redisRdmaFree(void *privctx)
+{
+  if (!privctx)
+    return;
+
+  free(privctx);
+}
+
+int main(int argc, char **argv)
+{
+
+  if (argc != 3)
+  {
+    printf("usage: ./client <ip> <port>\n");
+    return -1;
+  }
+
+  const char *ip = argv[1];
+  int port = atoi(argv[2]);
+
+  redisContext *c = calloc(1, sizeof(redisContext));
+  if (!c)
+  {
+    printf("failed to allocate memory\n");
+    return -1;
+  }
+
+  char msg[] = "hello world";
+  c->obuf = msg;
+  c->obuf_size = sizeof(msg);
+
+  c->tcp.host = strdup(ip);
+  c->tcp.port = port;
+
+  // redisContextConnectRdma -> redisRdmaWaitConn -> redisRdmaCM
+  redisContextConnectRdma(c, ip, port, NULL);
+  printf("start writing\n");
+  // write and read staff
+  redisRdmaWrite(c);
+
+  printf("end writing\n");
+  while (true)
+  {
+    connRdmaHandleCq(c, false);
+    if (connRdmaHandleCq(c, true) == 0xff)
+    {
+      // connRdmaHandleRecv(c, (RdmaContext *)c->privctx, ((RdmaContext *)c->privctx)->cm_id, 0, 0);
+      char msg_in[1024];
+      redisRdmaRead(c, msg_in, sizeof(msg_in));
+
+      printf("received: %s\n", msg_in);
+    }
+  }
+
+  // close connection
+  redisRdmaClose(c);
 }
