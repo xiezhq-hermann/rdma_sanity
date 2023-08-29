@@ -323,7 +323,6 @@ static int connRdmaHandleRecv(RdmaContext *ctx, struct rdma_cm_id *cm_id, uint32
     ctx->recv_offset = index * REDIS_RDMA_SERVER_RX_SIZE;
     ctx->outstanding_msg_size = byte_len;
 
-
     // just print this info and reply to the client
     printf("received message: %s\n", ctx->recv_buf + ctx->recv_offset);
     char *msg = "hello from server";
@@ -635,283 +634,32 @@ void acceptRdmaHandler()
         // todo: where to accept the connection?
 
         server.rdma_conn->cm_id = connpriv;
-        // acceptCommonHandler(connCreateAcceptedRdma(cfd, connpriv), 0, cip);
     }
 }
-
-// note: wait for connection establishment
-// static int connRdmaAccept(connection *conn, ConnectionCallbackFunc accept_handler)
-// {
-//     int ret = C_OK;
-
-//     if (conn->state != CONN_STATE_ACCEPTING)
-//         return C_ERR;
-
-//     conn->state = CONN_STATE_CONNECTED;
-
-//     connIncrRefs(conn);
-//     if (!callHandler(conn, accept_handler))
-//         ret = C_ERR;
-//     connDecrRefs(conn);
-
-//     return ret;
-// }
 
 void connRdmaEventHandler(void *clientData)
 {
     // serverLog(LL_VERBOSE, "RDMA: connRdmaEventHandler\n");
     rdma_connection *rdma_conn = (rdma_connection *)clientData;
-    // connection *conn = &rdma_conn->c;
-    // struct rdma_cm_id *cm_id = rdma_conn->cm_id;
-    // RdmaContext *ctx = cm_id->context;
 
     if (connRdmaHandleCq(rdma_conn, true) == C_ERR || connRdmaHandleCq(rdma_conn, false) == C_ERR)
     {
-        // conn->state = CONN_STATE_ERROR;
         return;
     }
-    // note: no need to invoke the write
-    // if (conn->write_handler)
-    // {
-    //     callHandler(conn, conn->write_handler);
-    // }
 }
 
-// note: replace the connection with a simpler rdma connection
-// static int connRdmaSetRwHandler(connection *conn)
+// let's not use non-blocking mode for now
+// since we are pulling the events manually anyways
+// if (anetNonBlock(NULL, cm_channel->fd) != C_OK)
 // {
-//     rdma_connection *rdma_conn = (rdma_connection *)conn;
-//     struct rdma_cm_id *cm_id = rdma_conn->cm_id;
-//     RdmaContext *ctx = cm_id->context;
-
-//     /* save conn into RdmaContext */
-//     ctx->conn = conn;
-
-//     return C_OK;
-// }
-
-// note: we probably won't need to set dedicated read/write handler either
-// static int connRdmaSetWriteHandler(connection *conn, ConnectionCallbackFunc func, int barrier)
-// {
-
-//     conn->write_handler = func;
-//     if (barrier)
-//     {
-//         conn->flags |= CONN_FLAG_WRITE_BARRIER;
-//     }
-//     else
-//     {
-//         conn->flags &= ~CONN_FLAG_WRITE_BARRIER;
-//     }
-
-//     return connRdmaSetRwHandler(conn);
-// }
-
-// static int connRdmaSetReadHandler(connection *conn, ConnectionCallbackFunc func)
-// {
-//     conn->read_handler = func;
-
-//     return connRdmaSetRwHandler(conn);
-// }
-
-// note: we won't need event driven mechanism as well
-// static void connSocketEventHandler(void *clientData, int mask)
-// {
-//     connection *conn = clientData;
-
-//     if (conn->state == CONN_STATE_CONNECTING &&
-//             (mask & AE_WRITABLE) && conn->conn_handler) {
-
-//         int conn_error = connGetSocketError(conn);
-//         if (conn_error) {
-//             conn->last_errno = conn_error;
-//             conn->state = CONN_STATE_ERROR;
-//         } else {
-//             conn->state = CONN_STATE_CONNECTED;
-//         }
-
-//         if (!conn->write_handler) aeDeleteFileEvent(server.el,conn->fd,AE_WRITABLE);
-
-//         if (!callHandler(conn, conn->conn_handler)) return;
-//         conn->conn_handler = NULL;
-//     }
-
-//     /* Normally we execute the readable event first, and the writable
-//      * event later. This is useful as sometimes we may be able
-//      * to serve the reply of a query immediately after processing the
-//      * query.
-//      *
-//      * However if WRITE_BARRIER is set in the mask, our application is
-//      * asking us to do the reverse: never fire the writable event
-//      * after the readable. In such a case, we invert the calls.
-//      * This is useful when, for instance, we want to do things
-//      * in the beforeSleep() hook, like fsync'ing a file to disk,
-//      * before replying to a client. */
-//     int invert = conn->flags & CONN_FLAG_WRITE_BARRIER;
-
-//     int call_write = (mask & AE_WRITABLE) && conn->write_handler;
-//     int call_read = (mask & AE_READABLE) && conn->read_handler;
-
-//     /* Handle normal I/O flows */
-//     if (!invert && call_read) {
-//         if (!callHandler(conn, conn->read_handler)) return;
-//     }
-//     /* Fire the writable event. */
-//     if (call_write) {
-//         if (!callHandler(conn, conn->write_handler)) return;
-//     }
-//     /* If we have to invert the call, fire the readable event now
-//      * after the writable one. */
-//     if (invert && call_read) {
-//         if (!callHandler(conn, conn->read_handler)) return;
-//     }
-// }
-
-// /* free resource during connection close */
-// static int rdmaResolveAddr(rdma_connection *rdma_conn, const char *addr, int port)
-// {
-//     struct addrinfo hints, *servinfo = NULL, *p = NULL;
-//     struct rdma_event_channel *cm_channel = NULL;
-//     struct rdma_cm_id *cm_id = NULL;
-//     RdmaContext *ctx = NULL;
-//     struct sockaddr_storage saddr;
-//     char _port[6]; /* strlen("65535") */
-//     int availableAddrs = 0;
-//     int ret = C_ERR;
-
-//     ctx = calloc(1, sizeof(RdmaContext));
-//     if (!ctx)
-//     {
-//         serverLog(LL_WARNING, "RDMA: Out of memory");
-//         goto out;
-//     }
-
-//     // ctx->timeEvent = -1;
-//     cm_channel = rdma_create_event_channel();
-//     if (!cm_channel)
-//     {
-//         serverLog(LL_WARNING, "RDMA: create event channel failed");
-//         goto out;
-//     }
-//     ctx->cm_channel = cm_channel;
-
-//     if (rdma_create_id(cm_channel, &cm_id, (void *)ctx, RDMA_PS_TCP))
-//     {
-//         serverLog(LL_WARNING, "RDMA: create id failed");
-//         goto out;
-//     }
-//     rdma_conn->cm_id = cm_id;
-
-//     // let's not use non-blocking mode for now
-//     // if (anetNonBlock(NULL, cm_channel->fd) != C_OK)
-//     // {
-//     //     serverLog(LL_WARNING, "RDMA: set cm channel fd non-block failed");
-//     //     goto out;
-//     // }
-
-//     snprintf(_port, 6, "%d", port);
-//     memset(&hints, 0, sizeof(hints));
-//     hints.ai_family = AF_INET;
-//     hints.ai_socktype = SOCK_STREAM;
-
-//     if (getaddrinfo(addr, _port, &hints, &servinfo))
-//     {
-//         hints.ai_family = AF_INET6;
-//         if (getaddrinfo(addr, _port, &hints, &servinfo))
-//         {
-//             serverLog(LL_WARNING, "RDMA: bad server addr info");
-//             goto out;
-//         }
-//     }
-
-//     for (p = servinfo; p != NULL; p = p->ai_next)
-//     {
-//         if (p->ai_family == PF_INET)
-//         {
-//             memcpy(&saddr, p->ai_addr, sizeof(struct sockaddr_in));
-//             ((struct sockaddr_in *)&saddr)->sin_port = htons(port);
-//         }
-//         else if (p->ai_family == PF_INET6)
-//         {
-//             memcpy(&saddr, p->ai_addr, sizeof(struct sockaddr_in6));
-//             ((struct sockaddr_in6 *)&saddr)->sin6_port = htons(port);
-//         }
-//         else
-//         {
-//             serverLog(LL_WARNING, "RDMA: Unsupported family");
-//             goto out;
-//         }
-
-//         /* resolve addr at most 100ms */
-//         if (rdma_resolve_addr(cm_id, NULL, (struct sockaddr *)&saddr, 100))
-//         {
-//             continue;
-//         }
-//         availableAddrs++;
-//     }
-
-//     if (!availableAddrs)
-//     {
-//         serverLog(LL_WARNING, "RDMA: server addr not available");
-//         goto out;
-//     }
-
-//     ret = C_OK;
-
-// out:
-//     if (servinfo)
-//     {
-//         freeaddrinfo(servinfo);
-//     }
-
-//     return ret;
+//     serverLog(LL_WARNING, "RDMA: set cm channel fd non-block failed");
+//     goto out;
 // }
 
 static void connRdmaClose(rdma_connection *rdma_conn)
 {
-    // serverLog(LL_VERBOSE, "RDMA: close connection %p", conn);
-    // rdma_connection *rdma_conn = (rdma_connection *)conn;
-    struct rdma_cm_id *cm_id = rdma_conn->cm_id;
-    RdmaContext *ctx;
-
-    // if (conn->fd != -1)
-    // {
-    //     aeDeleteFileEvent(server.el, conn->fd, AE_READABLE);
-    //     conn->fd = -1;
-    // }
-
-    if (!cm_id)
-    {
-        return;
-    }
-
-    ctx = cm_id->context;
-    // if (ctx->timeEvent > 0)
-    // {
-    //     aeDeleteTimeEvent(server.el, ctx->timeEvent);
-    // }
-
-    rdma_disconnect(cm_id);
-
-    /* poll all CQ before close */
-    connRdmaHandleCq(rdma_conn, true);
-    connRdmaHandleCq(rdma_conn, false);
-    rdmaReleaseResource(ctx);
-    if (cm_id->qp)
-    {
-        ibv_destroy_qp(cm_id->qp);
-    }
-
-    rdma_destroy_id(cm_id);
-    if (ctx->cm_channel)
-    {
-        // aeDeleteFileEvent(server.el, ctx->cm_channel->fd, AE_READABLE);
-        rdma_destroy_event_channel(ctx->cm_channel);
-    }
-
-    rdma_conn->cm_id = NULL;
-    free(ctx);
-    // free(conn);
+    // skip for now
+    return;
 }
 
 static inline uint32_t rdmaRead(RdmaContext *ctx, void *buf, size_t buf_len)
@@ -927,15 +675,8 @@ static inline uint32_t rdmaRead(RdmaContext *ctx, void *buf, size_t buf_len)
 
 static int connRdmaRead(rdma_connection *rdma_conn, void *buf, size_t buf_len)
 {
-    // rdma_connection *rdma_conn = (rdma_connection *)conn;
     struct rdma_cm_id *cm_id = rdma_conn->cm_id;
     RdmaContext *ctx = cm_id->context;
-    // serverLog(LL_DEBUG, "connection state: %d while reading data", conn->state);
-
-    // if (conn->state == CONN_STATE_ERROR || conn->state == CONN_STATE_CLOSED)
-    // {
-    //     return C_ERR;
-    // }
 
     // make sure the message is ready
     assert(ctx->outstanding_msg_size != 0);
@@ -1094,41 +835,11 @@ int listenToRdma(int port)
         index++;
     }
 
-    // serverLog(LL_VERBOSE, "RDMA: server start to listen on %d ports\n", sfd->count);
-    // sfd->fd[sfd->count] = listen_channel->fd;
-
-    // note: let's not use non-blocking mode for now
-    // anetNonBlock(NULL, sfd->fd[sfd->count]);
-    // skip it for now
-    // anetCloexec(sfd->fd[sfd->count]);
-    // sfd->count++;
-
-    // make it non-blocking
+    // note: make it non-blocking
     int flags = fcntl(listen_channel->fd, F_GETFL, 0);
     fcntl(listen_channel->fd, F_SETFL, flags | O_NONBLOCK);
 
     return C_OK;
-}
-
-// connection *connCreateRdma()
-// {
-//     rdma_connection *rdma_conn = calloc(1, sizeof(rdma_connection));
-//     rdma_conn->c.type = &CT_RDMA;
-//     rdma_conn->c.fd = -1;
-
-//     return (connection *)rdma_conn;
-// }
-
-// note: connection is established, add to server
-rdma_connection *connCreateAcceptedRdma(void *priv)
-{
-    rdma_connection *rdma_conn = calloc(1, sizeof(rdma_connection));
-    // todo: will not use this one
-    // rdma_conn->c.fd = fd;
-    // rdma_conn->c.state = CONN_STATE_ACCEPTING;
-    rdma_conn->cm_id = priv;
-
-    return rdma_conn;
 }
 
 int main(int argc, char **argv)
