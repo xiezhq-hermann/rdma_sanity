@@ -211,7 +211,7 @@ static int rdmaPostRecv(RdmaContext *ctx, struct rdma_cm_id *cm_id, uint32_t ind
     {
         return C_ERR;
     }
-    serverLog(LL_WARNING, "rdmaPostRecv: index=%d", index);
+    // serverLog(LL_WARNING, "rdmaPostRecv: index=%d", index);
 
     return C_OK;
 }
@@ -559,7 +559,7 @@ int rdmaAccept(char *err, char *ip, size_t ip_len, int *port, void **priv)
     }
 
     ev_type = ev->event;
-    // severLog(LL_DEBUG, "RDMA: event type %s", rdma_event_str(ev_type));
+    serverLog(LL_DEBUG, "RDMA: event type %s", rdma_event_str(ev_type));
     switch (ev_type)
     {
     case RDMA_CM_EVENT_CONNECT_REQUEST:

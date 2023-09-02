@@ -474,6 +474,7 @@ static int redisRdmaConnect(redisContext *c, struct rdma_cm_id *cm_id)
     __redisSetError(c, REDIS_ERR_OTHER, "RDMA: connect failed");
     goto destroy_iobuf;
   }
+  printf("RDMA: connected to %s:%d\n", c->tcp.host, c->tcp.port);
 
   return REDIS_OK;
 
@@ -613,7 +614,7 @@ int redisContextConnectRdma(redisContext *c, const char *addr, int port,
   int ret;
   char _port[6]; /* strlen("65535"); */
   struct addrinfo hints, *servinfo, *p;
-  long timeout_msec = -1;
+  long timeout_msec = INT_MAX;
   struct rdma_event_channel *cm_channel = NULL;
   struct rdma_cm_id *cm_id = NULL;
   RdmaContext *ctx = NULL;
@@ -677,15 +678,7 @@ int redisContextConnectRdma(redisContext *c, const char *addr, int port,
   }
   ctx->cm_id = cm_id;
 
-  // note, let's make it blocking for now
-  // if ((redisSetFdBlocking(c, cm_channel->fd, 0) != REDIS_OK))
-  // {
-  //   __redisSetError(c, REDIS_ERR_OTHER,
-  //                   "RDMA: set cm channel fd non-block failed");
-  //   goto free_rdma;
-  // }
-
-  // make it non-blocking
+  // note: make it non-blocking
   int flags = fcntl(cm_channel->fd, F_GETFL, 0);
   fcntl(cm_channel->fd, F_SETFL, flags | O_NONBLOCK);
 
@@ -716,7 +709,7 @@ int redisContextConnectRdma(redisContext *c, const char *addr, int port,
 
     // note: no timeout specified, negative number means large enough
     timed = timeout_msec - (redisNowMs() - start);
-    if (redisRdmaWaitConn(c, 50) == REDIS_OK) //&& (c->flags & REDIS_CONNECTED))
+    if ((redisRdmaWaitConn(c, timed) == REDIS_OK) && (c->flags & REDIS_CONNECTED))
     {
       ret = REDIS_OK;
       printf("rdma connect success\n");
@@ -791,11 +784,17 @@ int main(int argc, char **argv)
 
   // redisContextConnectRdma -> redisRdmaWaitConn -> redisRdmaCM
   redisContextConnectRdma(c, ip, port, NULL);
-  printf("start writing\n");
-  // write and read staff
-  redisRdmaWrite(c);
 
-  printf("end writing\n");
+  if (!(c->flags & REDIS_CONNECTED))
+  {
+    printf("failed to connect\n");
+    return -1;
+  }
+
+  printf("start writing\n");
+  redisRdmaWrite(c);
+  printf("waiting for response\n");
+
   while (true)
   {
     connRdmaHandleCq(c, false);
