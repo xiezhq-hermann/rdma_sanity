@@ -892,5 +892,7 @@ int main(int argc, char **argv)
         connRdmaEventHandler(server.rdma_conn);
     }
 
+    connRdmaClose(server.rdma_conn);
+
     return 0;
 }

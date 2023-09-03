@@ -1,14 +1,10 @@
 # Variables
 CC = gcc
 CFLAGS = -Wall -O2
-LDFLAGS = 
 LIBS = -lrdmacm -libverbs # You may need to link against RDMA related libraries or others.
-TARGET = client
-SRC = client.c # Assuming your source file is named client.c. Change this as needed.
-OBJ = $(SRC:.c=.o)
 
 # All targets
-all: client server
+all: client server ib_sanity
 
 # Target for client
 client: client.o
@@ -24,8 +20,16 @@ server: server.o
 server.o: server.c
 	$(CC) $(CFLAGS) -c server.c
 
+# Target for server
+ib_sanity: ib_sanity.o
+	$(CC) $(CFLAGS) -o ib_sanity ib_sanity.o $(LIBS)
+
+ib_sanity.o: ib_sanity.c
+	$(CC) $(CFLAGS) -c ib_sanity.c
+
+
 # Clean up
 clean:
-	rm -f client server *.o
+	rm -f client server ib_sanity *.o
 
 .PHONY: all clean
