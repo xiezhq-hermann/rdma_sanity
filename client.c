@@ -19,8 +19,8 @@
 
 #define MIN(a, b) (a) < (b) ? a : b
 #define RDMA_MAX_SGE 128
-#define RDMA_CLIENT_TX_SIZE 1024
-#define RDMA_CLIENT_RX_SIZE 8192
+#define RDMA_CLIENT_TX_SIZE 128
+#define RDMA_CLIENT_RX_SIZE 128
 
 #define REDIS_ERR -1
 #define REDIS_OK 0
@@ -484,6 +484,16 @@ static int redisRdmaConnect(redisContext *c, struct rdma_cm_id *cm_id)
     __redisSetError(c, REDIS_ERR_OTHER, "RDMA: create qp failed");
     goto error;
   }
+
+	int flags;
+  struct ibv_qp_attr attr = {0};
+	attr.pkey_index = 0;
+	attr.port_num = 1;
+	attr.qp_access_flags = IBV_ACCESS_LOCAL_WRITE;
+	attr.qp_state = IBV_QPS_INIT;
+	flags = IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS;
+	assert (!ibv_modify_qp(cm_id->qp, &attr, flags));
+
 
   ctx->cm_id = cm_id;
   ctx->send_cq = send_cq;

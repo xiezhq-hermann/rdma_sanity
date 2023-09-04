@@ -40,8 +40,8 @@
 
 #define MIN(a, b) (a) < (b) ? a : b
 #define REDIS_MAX_SGE 128
-#define REDIS_RDMA_SERVER_RX_SIZE 1024
-#define REDIS_RDMA_SERVER_TX_SIZE 8192
+#define REDIS_RDMA_SERVER_RX_SIZE 128
+#define REDIS_RDMA_SERVER_TX_SIZE 128
 
 #define NET_IP_STR_LEN 46 /* INET6_ADDRSTRLEN is 46, but we need to be sure */
 #define MAX_ACCEPTS_PER_CALL 1000
@@ -468,6 +468,15 @@ static int rdmaCreateResource(RdmaContext *ctx, struct rdma_cm_id *cm_id)
         serverLog(LL_WARNING, "RDMA: create qp failed");
         return C_ERR;
     }
+
+	int flags;
+    struct ibv_qp_attr attr = {0};
+	attr.pkey_index = 0;
+	attr.port_num = 1;
+	attr.qp_access_flags = IBV_ACCESS_LOCAL_WRITE;
+	attr.qp_state = IBV_QPS_INIT;
+	flags = IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS;
+	assert (!ibv_modify_qp(cm_id->qp, &attr, flags));
 
     if (rdmaSetupIoBuf(ctx, cm_id))
     {
