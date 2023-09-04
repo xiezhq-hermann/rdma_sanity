@@ -180,117 +180,6 @@ static void rdma_cm_client(struct ctx *ctx, const char *servername)
 	assert(!rdma_ack_cm_event(event));
 }
 
-static int tcp_client_connect(const char *servername)
-{
-	struct sockaddr_in addr = {0};
-	int sockfd;
-
-	sockfd = socket(AF_INET, SOCK_STREAM, 0);
-	assert(sockfd >= 0);
-
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons(PARAM_PORT);
-	assert(inet_aton(servername, &addr.sin_addr));
-	assert(!connect(sockfd, (struct sockaddr *) &addr, sizeof(addr)));
-
-	return sockfd;
-}
-
-static int tcp_server_listen(void)
-{
-	int n;
-	int sockfd = -1, connfd;
-	struct sockaddr_in addr = {0};
-
-	sockfd = socket(AF_INET, SOCK_STREAM, 0);
-	assert(sockfd >= 0);
-
-	n = 1;
-	setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &n, sizeof(n));
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons(PARAM_PORT);
-	assert(inet_aton("0.0.0.0", &addr.sin_addr));
-	assert(!bind(sockfd, (struct sockaddr *) &addr, sizeof(addr)));
-
-	listen(sockfd, 1);
-	connfd = accept(sockfd, NULL, 0);
-	assert(connfd >= 0);
-
-	close(sockfd);
-	return connfd;
-}
-
-static void tcp_handshake_write(int sockfd, const struct dest *my_dest)
-{
-	assert(write(sockfd, my_dest, sizeof(struct dest)) == sizeof(struct dest));
-}
-
-static void tcp_handshake_read(int sockfd, struct dest *remote_dest)
-{
-	assert(read(sockfd, remote_dest, sizeof(struct dest)) == sizeof(struct dest));
-}
-
-static void tcp_handshake(int sockfd, const struct dest *my_dest, struct dest *remote_dest)
-{
-	tcp_handshake_write(sockfd, my_dest);
-	tcp_handshake_read(sockfd, remote_dest);
-}
-
-static void qp_rtr(struct ibv_qp *qp, int path_mtu, const struct dest *remote_dest)
-{
-	int flags;
-	struct ibv_qp_attr attr = {0};
-
-	attr.ah_attr.dlid = remote_dest->lid;
-	attr.ah_attr.grh.dgid = remote_dest->gid;
-	attr.ah_attr.grh.hop_limit = 0xFF;
-	attr.ah_attr.grh.sgid_index = PARAM_GID_INDEX;
-	attr.ah_attr.grh.traffic_class = PARAM_TRAFFIC_CLASS;
-	attr.ah_attr.is_global = 1;
-	attr.ah_attr.port_num = PARAM_PORT_NUM;
-	attr.ah_attr.sl = PARAM_SL;
-	attr.ah_attr.src_path_bits = 0;
-	attr.dest_qp_num = remote_dest->qpn;
-	attr.max_dest_rd_atomic = PARAM_OUT_READS;
-	attr.min_rnr_timer = PARAM_MIN_RNR_TIMER;
-	attr.path_mtu = path_mtu;
-	attr.qp_state = IBV_QPS_RTR;
-	attr.rq_psn = remote_dest->psn;
-
-	flags = IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN | IBV_QP_RQ_PSN |
-		IBV_QP_MIN_RNR_TIMER | IBV_QP_MAX_DEST_RD_ATOMIC;
-
-	assert(!ibv_modify_qp(qp, &attr, flags));
-}
-
-static void qp_rts(struct ibv_qp *qp, const struct dest *my_dest)
-{
-	int flags;
-	struct ibv_qp_attr attr = {0};
-
-	attr.max_rd_atomic = PARAM_OUT_READS;
-	attr.qp_state = IBV_QPS_RTS;
-	attr.retry_cnt = 7;
-	attr.rnr_retry = 7;
-	attr.sq_psn = my_dest->psn;
-	attr.timeout = PARAM_QP_TIMEOUT;
-
-	flags = IBV_QP_STATE | IBV_QP_SQ_PSN | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY |
-		IBV_QP_MAX_QP_RD_ATOMIC;
-
-	assert(!ibv_modify_qp(qp, &attr, flags));
-}
-
-static void get_my_dest(struct ctx *ctx, struct dest *my_dest)
-{
-	struct ibv_port_attr port_attr = {0};
-
-	assert(!ibv_query_port(ctx->context, PARAM_PORT_NUM, &port_attr));
-	assert(!ibv_query_gid(ctx->context, PARAM_PORT_NUM, PARAM_GID_INDEX, &my_dest->gid));
-	my_dest->lid = port_attr.lid;
-	my_dest->psn = lrand48() & 0xffffff;
-	my_dest->qpn = ctx->qp->qp_num;
-}
 
 static struct ibv_device* find_ib_device(const char *ib_devname)
 {
@@ -507,26 +396,7 @@ int main(int argc, char *argv[])
 		else
 			rdma_cm_client(&ctx, servername);
 	} else {
-		qp_init(&ctx);
-
-		post_recv(&ctx, is_server, 1);
-
-		get_my_dest(&ctx, &my_dest);
-
-		if (is_server)
-			sockfd = tcp_server_listen();
-		else
-			sockfd = tcp_client_connect(servername);
-
-		tcp_handshake(sockfd, &my_dest, &remote_dest);
-
-		qp_rtr(ctx.qp, port_attr.active_mtu, &remote_dest);
-
-		qp_rts(ctx.qp, &my_dest);
-
-		// workaround for ENF: returning for RTR does not mean we are ready to receive. we might
-		// miss the first packets if we don't wait here
-		sleep(1);
+		// pass
 	}
 
 	ping_pong(&ctx, is_server);

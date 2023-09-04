@@ -34,6 +34,8 @@
 
 #define REDIS_CONNECTED 0x2
 
+char ib_devname[100];
+
 typedef struct redisContext
 {
   int err;          /* Error flags, 0 when there is no error */
@@ -410,6 +412,22 @@ static void redisRdmaClose(redisContext *c)
   rdma_destroy_event_channel(ctx->cm_channel);
 }
 
+static struct ibv_device* find_ib_device(const char *ib_devname)
+{
+	int num_of_device;
+	struct ibv_device **dev_list;
+	struct ibv_device *ib_dev = NULL;
+
+	dev_list = ibv_get_device_list(&num_of_device);
+	assert(num_of_device > 0);
+	for (; (ib_dev = *dev_list); ++dev_list)
+		if (!strcmp(ibv_get_device_name(ib_dev), ib_devname))
+			break;
+	assert(ib_dev);
+	return ib_dev;
+}
+
+
 static int redisRdmaConnect(redisContext *c, struct rdma_cm_id *cm_id)
 {
   printf("route resolved, creating RDMA structs\n");
@@ -419,21 +437,29 @@ static int redisRdmaConnect(redisContext *c, struct rdma_cm_id *cm_id)
   struct ibv_qp_init_attr init_attr = {0};
   struct rdma_conn_param conn_param = {0};
 
-  pd = ibv_alloc_pd(cm_id->verbs);
+
+  // todo: replacing it with manual ib_dev?
+	struct ibv_device *ib_dev;
+	ib_dev = find_ib_device(ib_devname);
+    struct ibv_context *ib_context;
+    ib_context = ibv_open_device(ib_dev);
+    assert(ib_context);
+	pd = ibv_alloc_pd(ib_context);
+  // pd = ibv_alloc_pd(cm_id->verbs);
   if (!pd)
   {
     __redisSetError(c, REDIS_ERR_OTHER, "RDMA: alloc pd failed");
     goto error;
   }
 
-  send_cq = ibv_create_cq(cm_id->verbs, RDMA_MAX_SGE, NULL, NULL, 0);
+  send_cq = ibv_create_cq(ib_context, RDMA_MAX_SGE, NULL, NULL, 0);
   if (!send_cq)
   {
     __redisSetError(c, REDIS_ERR_OTHER, "RDMA: create send cq failed");
     goto error;
   }
 
-  recv_cq = ibv_create_cq(cm_id->verbs, RDMA_MAX_SGE, NULL, NULL, 0);
+  recv_cq = ibv_create_cq(ib_context, RDMA_MAX_SGE, NULL, NULL, 0);
   if (!recv_cq)
   {
     __redisSetError(c, REDIS_ERR_OTHER, "RDMA: create recv cq failed");
@@ -450,7 +476,10 @@ static int redisRdmaConnect(redisContext *c, struct rdma_cm_id *cm_id)
   init_attr.recv_cq = recv_cq;
   init_attr.srq = NULL;
   init_attr.sq_sig_all = 1;
-  if (rdma_create_qp(cm_id, pd, &init_attr))
+
+  cm_id->qp = ibv_create_qp(pd, &init_attr);
+  // if (rdma_create_qp(cm_id, pd, &init_attr))
+  if (!cm_id->qp)
   {
     __redisSetError(c, REDIS_ERR_OTHER, "RDMA: create qp failed");
     goto error;
@@ -759,14 +788,16 @@ static void redisRdmaFree(void *privctx)
 int main(int argc, char **argv)
 {
 
-  if (argc != 3)
+  if (argc != 4)
   {
-    printf("usage: ./client <ip> <port>\n");
+    printf("usage: ./client <ip> <port> <device_name>\n");
     return -1;
   }
 
   const char *ip = argv[1];
   int port = atoi(argv[2]);
+  memset(ib_devname, 0, sizeof(ib_devname));
+  strncpy(ib_devname, argv[3], sizeof(ib_devname)-1);
 
   redisContext *c = calloc(1, sizeof(redisContext));
   if (!c)

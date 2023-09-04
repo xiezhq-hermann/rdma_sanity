@@ -149,6 +149,7 @@ typedef struct RdmaContext
 struct redisServer server; /* Server global state */
 static struct rdma_event_channel *listen_channel;
 static struct rdma_cm_id *listen_cmids[CONFIG_BINDADDR_MAX];
+char ib_devname[100];
 
 static size_t rdmaPostSend(RdmaContext *ctx, struct rdma_cm_id *cm_id, const void *data, size_t data_len)
 {
@@ -394,6 +395,21 @@ pollcq:
     goto pollcq;
 }
 
+static struct ibv_device* find_ib_device(const char *ib_devname)
+{
+	int num_of_device;
+	struct ibv_device **dev_list;
+	struct ibv_device *ib_dev = NULL;
+
+	dev_list = ibv_get_device_list(&num_of_device);
+	assert(num_of_device > 0);
+	for (; (ib_dev = *dev_list); ++dev_list)
+		if (!strcmp(ibv_get_device_name(ib_dev), ib_devname))
+			break;
+	assert(ib_dev);
+	return ib_dev;
+}
+
 static int rdmaCreateResource(RdmaContext *ctx, struct rdma_cm_id *cm_id)
 {
     int ret = C_OK;
@@ -402,7 +418,14 @@ static int rdmaCreateResource(RdmaContext *ctx, struct rdma_cm_id *cm_id)
     struct ibv_cq *recv_cq = NULL;
     struct ibv_pd *pd = NULL;
 
-    pd = ibv_alloc_pd(cm_id->verbs);
+    // todo: replacing it with manual ib_dev?
+	struct ibv_device *ib_dev;
+	ib_dev = find_ib_device(ib_devname);
+    struct ibv_context *ib_context;
+    ib_context = ibv_open_device(ib_dev);
+    assert(ib_context);
+	pd = ibv_alloc_pd(ib_context);
+    // pd = ibv_alloc_pd(cm_id->verbs);
     if (!pd)
     {
         serverLog(LL_WARNING, "RDMA: ibv alloc pd failed");
@@ -411,14 +434,14 @@ static int rdmaCreateResource(RdmaContext *ctx, struct rdma_cm_id *cm_id)
 
     ctx->pd = pd;
 
-    send_cq = ibv_create_cq(cm_id->verbs, REDIS_MAX_SGE, NULL, NULL, 0);
+    send_cq = ibv_create_cq(ib_context, REDIS_MAX_SGE, NULL, NULL, 0);
     if (!send_cq)
     {
         serverLog(LL_WARNING, "RDMA: ibv create send cq failed");
         return C_ERR;
     }
 
-    recv_cq = ibv_create_cq(cm_id->verbs, REDIS_MAX_SGE, NULL, NULL, 0);
+    recv_cq = ibv_create_cq(ib_context, REDIS_MAX_SGE, NULL, NULL, 0);
     if (!recv_cq)
     {
         serverLog(LL_WARNING, "RDMA: ibv create recv cq failed");
@@ -437,8 +460,10 @@ static int rdmaCreateResource(RdmaContext *ctx, struct rdma_cm_id *cm_id)
     init_attr.send_cq = send_cq;
     init_attr.recv_cq = recv_cq;
     init_attr.srq = NULL;
-    ret = rdma_create_qp(cm_id, pd, &init_attr);
-    if (ret)
+
+    cm_id->qp = ibv_create_qp(ctx->pd, &init_attr);
+    // ret = rdma_create_qp(cm_id, pd, &init_attr);
+    if (!cm_id->qp)
     {
         serverLog(LL_WARNING, "RDMA: create qp failed");
         return C_ERR;
@@ -844,9 +869,9 @@ int listenToRdma(int port)
 
 int main(int argc, char **argv)
 {
-    if (argc != 3)
+    if (argc != 4)
     {
-        printf("usage: ./server <ip> <port>\n");
+        printf("usage: ./server <ip> <port> <device_name>\n");
         return -1;
     }
 
@@ -858,6 +883,9 @@ int main(int argc, char **argv)
     server.port = port;
     server.connected = false;
     server.rdma_conn = calloc(1, sizeof(rdma_connection));
+
+    memset(ib_devname, 0, sizeof(ib_devname));
+    strncpy(ib_devname, argv[3], sizeof(ib_devname)-1);
 
     if (listenToRdma(port) == C_ERR)
     {
