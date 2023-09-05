@@ -18,7 +18,7 @@
 #include <fcntl.h>
 
 #define MIN(a, b) (a) < (b) ? a : b
-#define RDMA_MAX_SGE 128
+#define RDMA_MAX_SGE 127
 #define RDMA_CLIENT_TX_SIZE 128
 #define RDMA_CLIENT_RX_SIZE 128
 
@@ -58,19 +58,6 @@ typedef struct redisContext
 
 } redisContext;
 
-void redisFree(redisContext *c)
-{
-  if (c == NULL)
-    return;
-
-  free(c->obuf);
-  free(c->tcp.host);
-  free(c->tcp.source_addr);
-
-  memset(c, 0xff, sizeof(*c));
-  free(c);
-}
-
 typedef struct RdmaContext
 {
   struct rdma_cm_id *cm_id;
@@ -85,7 +72,6 @@ typedef struct RdmaContext
   struct ibv_mr *send_mr;
 
   bool *send_status;
-  struct ibv_mr *status_mr;
 
   /* RX */
   char *recv_buf;
@@ -215,12 +201,6 @@ static void rdmaDestroyIoBuf(RdmaContext *ctx)
   munmap(ctx->send_buf, RDMA_MAX_SGE * RDMA_CLIENT_TX_SIZE);
   ctx->send_buf = NULL;
 
-  if (ctx->status_mr)
-  {
-    ibv_dereg_mr(ctx->status_mr);
-    ctx->status_mr = NULL;
-  }
-
   munmap(ctx->send_status, RDMA_MAX_SGE * sizeof(bool));
   ctx->send_status = NULL;
 }
@@ -232,12 +212,6 @@ static int rdmaSetupIoBuf(redisContext *c, RdmaContext *ctx,
   size_t length = RDMA_MAX_SGE * sizeof(bool);
   ctx->send_status = mmap(NULL, length, PROT_READ | PROT_WRITE,
                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  ctx->status_mr = ibv_reg_mr(ctx->pd, ctx->send_status, length, access);
-  if (!ctx->status_mr)
-  {
-    __redisSetError(c, REDIS_ERR_OTHER, "RDMA: reg status mr failed");
-    goto destroy_iobuf;
-  }
 
   // note: ban remote read and write
   //   access =
@@ -433,51 +407,49 @@ static int redisRdmaConnect(redisContext *c, struct rdma_cm_id *cm_id)
   printf("route resolved, creating RDMA structs\n");
   RdmaContext *ctx = (RdmaContext *)c->privctx;
   struct ibv_cq *send_cq, *recv_cq;
-  struct ibv_pd *pd = NULL;
   struct ibv_qp_init_attr init_attr = {0};
   struct rdma_conn_param conn_param = {0};
 
 
-  // todo: replacing it with manual ib_dev?
 	struct ibv_device *ib_dev;
 	ib_dev = find_ib_device(ib_devname);
-    struct ibv_context *ib_context;
-    ib_context = ibv_open_device(ib_dev);
-    assert(ib_context);
-	pd = ibv_alloc_pd(ib_context);
+  struct ibv_context *ib_context;
+  ib_context = ibv_open_device(ib_dev);
+  assert(ib_context);
+  ctx->pd = ibv_alloc_pd(ib_context);
   // pd = ibv_alloc_pd(cm_id->verbs);
-  if (!pd)
+  if (!ctx->pd)
   {
     __redisSetError(c, REDIS_ERR_OTHER, "RDMA: alloc pd failed");
     goto error;
   }
 
-  send_cq = ibv_create_cq(ib_context, RDMA_MAX_SGE, NULL, NULL, 0);
-  if (!send_cq)
+  ctx->send_cq = ibv_create_cq(ib_context, RDMA_MAX_SGE, NULL, NULL, 0);
+  if (!ctx->send_cq)
   {
     __redisSetError(c, REDIS_ERR_OTHER, "RDMA: create send cq failed");
     goto error;
   }
 
-  recv_cq = ibv_create_cq(ib_context, RDMA_MAX_SGE, NULL, NULL, 0);
-  if (!recv_cq)
+  ctx->recv_cq = ibv_create_cq(ib_context, RDMA_MAX_SGE, NULL, NULL, 0);
+  if (!ctx->recv_cq)
   {
     __redisSetError(c, REDIS_ERR_OTHER, "RDMA: create recv cq failed");
     goto error;
   }
 
   /* create qp with attr */
-  init_attr.cap.max_send_wr = RDMA_MAX_SGE;
-  init_attr.cap.max_recv_wr = RDMA_MAX_SGE;
-  init_attr.cap.max_send_sge = 1;
   init_attr.cap.max_recv_sge = 1;
+  init_attr.cap.max_send_wr = RDMA_MAX_SGE;
+  init_attr.cap.max_send_sge = 1;
+  init_attr.cap.max_recv_wr = RDMA_MAX_SGE;
   init_attr.qp_type = IBV_QPT_RC;
-  init_attr.send_cq = send_cq;
-  init_attr.recv_cq = recv_cq;
+  init_attr.send_cq = ctx->send_cq;
+  init_attr.recv_cq = ctx->recv_cq;
   init_attr.srq = NULL;
   init_attr.sq_sig_all = 1;
 
-  cm_id->qp = ibv_create_qp(pd, &init_attr);
+  cm_id->qp = ibv_create_qp(ctx->pd, &init_attr);
   // if (rdma_create_qp(cm_id, pd, &init_attr))
   if (!cm_id->qp)
   {
@@ -495,14 +467,11 @@ static int redisRdmaConnect(redisContext *c, struct rdma_cm_id *cm_id)
 	assert (!ibv_modify_qp(cm_id->qp, &attr, flags));
 
 
-  ctx->cm_id = cm_id;
-  ctx->send_cq = send_cq;
-  ctx->recv_cq = recv_cq;
-  ctx->pd = pd;
 
   if (rdmaSetupIoBuf(c, ctx, cm_id) != REDIS_OK)
     goto free_qp;
 
+  ctx->cm_id = cm_id;
   /* rdma connect with param */
   conn_param.responder_resources = 0;
   conn_param.initiator_depth = 0;
@@ -522,12 +491,12 @@ destroy_iobuf:
 free_qp:
   ibv_destroy_qp(cm_id->qp);
 error:
-  if (send_cq)
-    ibv_destroy_cq(send_cq);
-  if (recv_cq)
-    ibv_destroy_cq(recv_cq);
-  if (pd)
-    ibv_dealloc_pd(pd);
+  if (ctx->send_cq)
+    ibv_destroy_cq(ctx->send_cq);
+  if (ctx->recv_cq)
+    ibv_destroy_cq(ctx->recv_cq);
+  if (ctx->pd)
+    ibv_dealloc_pd(ctx->pd);
 
   return REDIS_ERR;
 }
@@ -710,7 +679,7 @@ int redisContextConnectRdma(redisContext *c, const char *addr, int port,
 
   ctx->cm_channel = cm_channel;
 
-  if (rdma_create_id(cm_channel, &cm_id, (void *)ctx, RDMA_PS_TCP))
+  if (rdma_create_id(cm_channel, &cm_id, NULL, RDMA_PS_TCP))
   {
     __redisSetError(c, REDIS_ERR_OTHER, "RDMA: create id failed");
     return REDIS_ERR;

@@ -10,7 +10,6 @@
 #include <unistd.h>
 #include <sys/mman.h>
 
-#include <infiniband/verbs.h>
 #include <rdma/rdma_cma.h>
 
 #define PAGE_SIZE 4096
@@ -34,20 +33,16 @@
 struct ctx {
 	char *send_buf;
 	char *recv_buf;
-	struct ibv_context *context;
+	// struct ibv_context *context;
 	struct ibv_cq *recv_cq;
 	struct ibv_cq *send_cq;
-	struct ibv_mr *mr;
+	// struct ibv_mr *mr;
+	struct ibv_mr *send_mr;
+	struct ibv_mr *recv_mr;
 	struct ibv_pd *pd;
-	struct ibv_qp *qp;
+	// struct ibv_qp *qp;
+	struct rdma_cm_id *cm_id;
 };
-
-struct dest {
-	int lid;
-	int psn;
-	int qpn;
-	union ibv_gid gid;
- };
 
 static int *payload_lengths;
 static int payload_length_count;
@@ -58,7 +53,7 @@ static void qp_init(struct ctx *ctx)
 	struct ibv_qp_attr attr = {0};
 	int flags;
 
-	qp_init_attr.cap.max_inline_data = PARAM_INLINE_SIZE;
+	// qp_init_attr.cap.max_inline_data = PARAM_INLINE_SIZE;
 	qp_init_attr.cap.max_recv_sge = PARAM_MAX_RECV_SGE;
 	qp_init_attr.cap.max_recv_wr = PARAM_RX_DEPTH;
 	qp_init_attr.cap.max_send_sge = PARAM_MAX_SEND_SGE;
@@ -68,9 +63,10 @@ static void qp_init(struct ctx *ctx)
 	qp_init_attr.send_cq = ctx->send_cq;
 	qp_init_attr.srq = NULL;
 
-	ctx->qp = ibv_create_qp(ctx->pd, &qp_init_attr);
-	assert(ctx->qp);
+	ctx->cm_id->qp = ibv_create_qp(ctx->pd, &qp_init_attr);
+	assert(ctx->cm_id->qp);
 
+	// note
 	attr.pkey_index = 0;
 	attr.port_num = PARAM_PORT_NUM;
 	attr.qp_access_flags = IBV_ACCESS_LOCAL_WRITE;
@@ -78,7 +74,7 @@ static void qp_init(struct ctx *ctx)
 
 	flags = IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS;
 
-	assert (!ibv_modify_qp(ctx->qp, &attr, flags));
+	assert (!ibv_modify_qp(ctx->cm_id->qp, &attr, flags));
 }
 
 static int get_len(int server_tx, int id)
@@ -98,22 +94,30 @@ static void post_recv(const struct ctx *ctx, int is_server, int id)
 	struct ibv_sge recv_sge_list = {0};
 
 	clear_recv_buf(ctx);
-	recv_sge_list.addr = (uintptr_t) ctx->recv_buf;
-	recv_sge_list.length = get_len(!is_server, id);
-	recv_sge_list.lkey = ctx->mr->lkey;
+	// recv_sge_list.addr = (uintptr_t) ctx->recv_buf;
+	// recv_sge_list.length = get_len(!is_server, id);
+	// recv_sge_list.lkey = ctx->recv_mr->lkey;
+	// rwr.next = NULL;
+	// rwr.num_sge = PARAM_MAX_RECV_SGE;
+	// rwr.sg_list = &recv_sge_list;
+	// rwr.wr_id = 0;
+
+	struct ibv_sge sge;
+	sge.addr = (uint64_t)(ctx->recv_buf);
+	sge.length = get_len(!is_server, id);
+	sge.lkey = ctx->recv_mr->lkey;
 	rwr.next = NULL;
 	rwr.num_sge = PARAM_MAX_RECV_SGE;
-	rwr.sg_list = &recv_sge_list;
+	rwr.sg_list = &sge;
 	rwr.wr_id = 0;
 
-	assert(!ibv_post_recv(ctx->qp, &rwr, &bad_wr_recv));
+	assert(!ibv_post_recv(ctx->cm_id->qp, &rwr, &bad_wr_recv));
 }
 
 static void rdma_cm_server(struct ctx *ctx, const char *servername)
 {
 	int is_server = 1;
 	struct rdma_cm_event *event;
-	struct rdma_cm_id *cm_id;
 	struct rdma_conn_param conn_param = {0};
 	struct rdma_event_channel *channel;
 	struct sockaddr_in addr = {0};
@@ -121,20 +125,21 @@ static void rdma_cm_server(struct ctx *ctx, const char *servername)
 	channel = rdma_create_event_channel();
 	assert(channel);
 
-	assert(!rdma_create_id(channel, &cm_id, NULL, RDMA_PS_TCP));
+	assert(!rdma_create_id(channel, &ctx->cm_id, NULL, RDMA_PS_TCP));
 
 	addr.sin_family = AF_INET;
 	addr.sin_port = htons(PARAM_PORT);
+	// note
 	assert(inet_aton(servername, &addr.sin_addr));
-	assert(!rdma_bind_addr(cm_id, (struct sockaddr *)&addr));
+	assert(!rdma_bind_addr(ctx->cm_id, (struct sockaddr *)&addr));
 
-	assert(!rdma_listen(cm_id, 1));
+	assert(!rdma_listen(ctx->cm_id, 0));
 
 	assert(!rdma_get_cm_event(channel, &event));
 	assert(event->event == RDMA_CM_EVENT_CONNECT_REQUEST);
 	qp_init(ctx);
 	post_recv(ctx, is_server, 1);
-	conn_param.qp_num = ctx->qp->qp_num;
+	conn_param.qp_num = ctx->cm_id->qp->qp_num;
 	assert(!rdma_accept(event->id, &conn_param));
 	assert(!rdma_ack_cm_event(event));
 
@@ -147,7 +152,6 @@ static void rdma_cm_client(struct ctx *ctx, const char *servername)
 {
 	int is_server = 0;
 	struct rdma_cm_event *event;
-	struct rdma_cm_id *cm_id;
 	struct rdma_conn_param conn_param = {0};
 	struct rdma_event_channel *channel;
 	struct sockaddr_in addr = {0};
@@ -155,24 +159,27 @@ static void rdma_cm_client(struct ctx *ctx, const char *servername)
 	channel = rdma_create_event_channel();
 	assert(channel);
 
-	assert(!rdma_create_id(channel, &cm_id, NULL, RDMA_PS_TCP));
+	assert(!rdma_create_id(channel, &ctx->cm_id, NULL, RDMA_PS_TCP));
 
 	addr.sin_family = AF_INET;
 	addr.sin_port = htons(PARAM_PORT);
 	assert(inet_aton(servername, &addr.sin_addr));
-	assert(!rdma_resolve_addr(cm_id, NULL, (struct sockaddr *)&addr, 2000));
+	assert(!rdma_resolve_addr(ctx->cm_id, NULL, (struct sockaddr *)&addr, 2000));
 
 	assert(!rdma_get_cm_event(channel, &event));
 	assert(event->event == RDMA_CM_EVENT_ADDR_RESOLVED);
-	assert(!rdma_resolve_route(cm_id, 2000));
+	assert(!rdma_resolve_route(ctx->cm_id, 2000));
 	assert(!rdma_ack_cm_event(event));
 
 	assert(!rdma_get_cm_event(channel, &event));
 	assert(event->event == RDMA_CM_EVENT_ROUTE_RESOLVED);
 	qp_init(ctx);
 	post_recv(ctx, is_server, 1);
-	conn_param.qp_num = ctx->qp->qp_num;
-	assert(!rdma_connect(cm_id, &conn_param));
+
+	conn_param.responder_resources = 0;
+	conn_param.initiator_depth = 0;
+	conn_param.qp_num = ctx->cm_id->qp->qp_num;
+	assert(!rdma_connect(ctx->cm_id, &conn_param));
 	assert(!rdma_ack_cm_event(event));
 
 	assert(!rdma_get_cm_event(channel, &event));
@@ -251,7 +258,8 @@ static void tx(const struct ctx *ctx, int is_server, int id)
 	int ne, len;
 	struct ibv_send_wr *bad_wr;
 	struct ibv_send_wr wr;
-	struct ibv_sge sge_list;
+	// struct ibv_sge sge_list;
+	struct ibv_sge sge;
 	struct ibv_wc s_wc;
 
 	// FIXME recv side needs time to post a buffer... SF-652
@@ -261,18 +269,24 @@ static void tx(const struct ctx *ctx, int is_server, int id)
 	assert(len <= PARAM_MR_LENGTH / 2);
 	get_msg(ctx->send_buf, len, is_server, id);
 
-	sge_list.addr = (uintptr_t) ctx->send_buf;
-	sge_list.length = len;
-	sge_list.lkey = ctx->mr->lkey;
+	sge.addr = (uint64_t)ctx->send_buf;
+	sge.lkey = ctx->send_mr->lkey;
+	sge.length = len;
+
+
+	// sge_list.addr = (uintptr_t) ctx->send_buf;
+	// sge_list.length = len;
+	// sge_list.lkey = ctx->send_mr->lkey;
 	wr.next = NULL;
 	wr.num_sge = PARAM_MAX_SEND_SGE;
 	wr.opcode = IBV_WR_SEND;
 	wr.send_flags = IBV_SEND_SIGNALED;
-	wr.sg_list = &sge_list;
+	// wr.sg_list = &sge_list;
+	wr.sg_list = &sge;
 	wr.sg_list->length = len;
 	wr.wr_id = 0;
 
-	assert(!ibv_post_send(ctx->qp, &wr, &bad_wr));
+	assert(!ibv_post_send(ctx->cm_id->qp, &wr, &bad_wr));
 
 	// Prefill with an invalid value to catch ibv_poll_cq if it does not update s_wc.
 	s_wc.status = -1;
@@ -281,6 +295,7 @@ static void tx(const struct ctx *ctx, int is_server, int id)
 		ne = ibv_poll_cq(ctx->send_cq, 1, &s_wc);
 	} while (!ne);
 	assert(ne > 0);
+	printf("tx: s_wc.status=%d\n", s_wc.status);
 	assert(s_wc.status == IBV_WC_SUCCESS);
 }
 
@@ -322,25 +337,31 @@ static void init(const char *ib_devname, struct ctx *ctx)
 
 	ib_dev = find_ib_device(ib_devname);
 
-	ctx->context = ibv_open_device(ib_dev);
-	assert(ctx->context);
+	struct ibv_context *ib_context;
+	ib_context = ibv_open_device(ib_dev);
+	assert(ib_context);
 
-	ctx->pd = ibv_alloc_pd(ctx->context);
+	ctx->pd = ibv_alloc_pd(ib_context);
 	assert(ctx->pd);
+
+	ctx->send_cq = ibv_create_cq(ib_context, PARAM_TX_DEPTH, NULL, NULL, PARAM_EQ_NUM);
+	assert(ctx->send_cq);
+
+	ctx->recv_cq = ibv_create_cq(ib_context, PARAM_RX_DEPTH, NULL, NULL, PARAM_EQ_NUM);
+	assert(ctx->recv_cq);
 
 	ctx->send_buf = mmap(NULL, PARAM_MR_LENGTH, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	assert(ctx->send_buf != MAP_FAILED);
 
-	ctx->recv_buf = ctx->send_buf + PARAM_MR_LENGTH / 2;
+	// ctx->recv_buf = ctx->send_buf + PARAM_MR_LENGTH / 2;
+	ctx->recv_buf = mmap(NULL, PARAM_MR_LENGTH, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	assert(ctx->recv_buf != MAP_FAILED);
 
-	ctx->mr = ibv_reg_mr(ctx->pd, ctx->send_buf, PARAM_MR_LENGTH, IBV_ACCESS_LOCAL_WRITE);
-	assert(ctx->mr);
 
-	ctx->send_cq = ibv_create_cq(ctx->context, PARAM_TX_DEPTH, NULL, NULL, PARAM_EQ_NUM);
-	assert(ctx->send_cq);
+	ctx->send_mr = ibv_reg_mr(ctx->pd, ctx->send_buf, PARAM_MR_LENGTH, IBV_ACCESS_LOCAL_WRITE);
+	ctx->recv_mr = ibv_reg_mr(ctx->pd, ctx->recv_buf, PARAM_MR_LENGTH, IBV_ACCESS_LOCAL_WRITE);
 
-	ctx->recv_cq = ibv_create_cq(ctx->context, PARAM_RX_DEPTH, NULL, NULL, PARAM_EQ_NUM);
-	assert(ctx->recv_cq);
+	// assert(ctx->mr);
 }
 
 
@@ -353,9 +374,7 @@ int main(int argc, char *argv[])
 	char *payloads;
 	int sockfd = -1, is_server, rdma_cm;
 	struct ctx ctx = {0};
-	struct dest my_dest = {0};
-	struct dest remote_dest = {0};
-	struct ibv_port_attr port_attr;
+	// struct ibv_port_attr port_attr;
 
 	if (argc != 6) {
 		fprintf(stderr, "Usage: %s [server|client] payloads server_ip ib_devname rdma_cm\n", argv[0]);
@@ -387,8 +406,8 @@ int main(int argc, char *argv[])
 
 	init(ib_devname, &ctx);
 
-	assert(!ibv_query_port(ctx.context, PARAM_PORT_NUM, &port_attr));
-	assert(port_attr.state == IBV_PORT_ACTIVE);
+	// assert(!ibv_query_port(ctx.context, PARAM_PORT_NUM, &port_attr));
+	// assert(port_attr.state == IBV_PORT_ACTIVE);
 
 	if (rdma_cm) {
 		if (is_server)
@@ -404,12 +423,13 @@ int main(int argc, char *argv[])
 	if (sockfd != -1)
 		close(sockfd);
 
-	assert(!ibv_destroy_qp(ctx.qp));
+	// assert(!ibv_destroy_qp(ctx.qp));
+	assert(!ibv_destroy_cq(ctx.cm_id->send_cq));
 	assert(!ibv_destroy_cq(ctx.send_cq));
 	assert(!ibv_destroy_cq(ctx.recv_cq));
-	assert(!ibv_dereg_mr(ctx.mr));
+	// assert(!ibv_dereg_mr(ctx.mr));
 	assert(!ibv_dealloc_pd(ctx.pd));
-	assert(!ibv_close_device(ctx.context));
+	// assert(!ibv_close_device(ctx.context));
 
 	munmap(ctx.send_buf, PARAM_MR_LENGTH);
 

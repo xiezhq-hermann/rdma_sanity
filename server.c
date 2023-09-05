@@ -39,7 +39,7 @@
 #define LL_WARNING 3
 
 #define MIN(a, b) (a) < (b) ? a : b
-#define REDIS_MAX_SGE 128
+#define REDIS_MAX_SGE 127
 #define REDIS_RDMA_SERVER_RX_SIZE 128
 #define REDIS_RDMA_SERVER_TX_SIZE 128
 
@@ -123,10 +123,8 @@ typedef struct RdmaContext
     char *ip;
     int port;
     struct ibv_pd *pd;
-    struct rdma_event_channel *cm_channel;
     struct ibv_cq *send_cq;
     struct ibv_cq *recv_cq;
-    // long long timeEvent;
 
     /* TX */
     char *send_buf;
@@ -134,7 +132,6 @@ typedef struct RdmaContext
     struct ibv_mr *send_mr;
 
     bool *send_status;
-    struct ibv_mr *status_mr;
 
     /* RX */
     char *recv_buf;
@@ -237,11 +234,11 @@ static void rdmaDestroyIoBuf(RdmaContext *ctx)
     munmap(ctx->send_buf, REDIS_MAX_SGE * REDIS_RDMA_SERVER_TX_SIZE);
     ctx->send_buf = NULL;
 
-    if (ctx->status_mr)
-    {
-        ibv_dereg_mr(ctx->status_mr);
-        ctx->status_mr = NULL;
-    }
+    // if (ctx->status_mr)
+    // {
+    //     ibv_dereg_mr(ctx->status_mr);
+    //     ctx->status_mr = NULL;
+    // }
 
     munmap(ctx->send_status, REDIS_MAX_SGE * sizeof(bool));
     ctx->send_status = NULL;
@@ -252,12 +249,6 @@ static int rdmaSetupIoBuf(RdmaContext *ctx, struct rdma_cm_id *cm_id)
     int access = IBV_ACCESS_LOCAL_WRITE;
     size_t length = REDIS_MAX_SGE * sizeof(bool);
     ctx->send_status = mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    ctx->status_mr = ibv_reg_mr(ctx->pd, ctx->send_status, length, access);
-    if (!ctx->status_mr)
-    {
-        serverLog(LL_WARNING, "RDMA: reg mr for status failed");
-        goto destroy_iobuf;
-    }
 
     // note: only grant local write access
     // access = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
@@ -414,9 +405,6 @@ static int rdmaCreateResource(RdmaContext *ctx, struct rdma_cm_id *cm_id)
 {
     int ret = C_OK;
     struct ibv_qp_init_attr init_attr;
-    struct ibv_cq *send_cq = NULL;
-    struct ibv_cq *recv_cq = NULL;
-    struct ibv_pd *pd = NULL;
 
     // todo: replacing it with manual ib_dev?
 	struct ibv_device *ib_dev;
@@ -424,32 +412,26 @@ static int rdmaCreateResource(RdmaContext *ctx, struct rdma_cm_id *cm_id)
     struct ibv_context *ib_context;
     ib_context = ibv_open_device(ib_dev);
     assert(ib_context);
-	pd = ibv_alloc_pd(ib_context);
-    // pd = ibv_alloc_pd(cm_id->verbs);
-    if (!pd)
+	ctx->pd = ibv_alloc_pd(ib_context);
+    if (!ctx->pd)
     {
         serverLog(LL_WARNING, "RDMA: ibv alloc pd failed");
         return C_ERR;
     }
 
-    ctx->pd = pd;
-
-    send_cq = ibv_create_cq(ib_context, REDIS_MAX_SGE, NULL, NULL, 0);
-    if (!send_cq)
+    ctx->send_cq = ibv_create_cq(ib_context, REDIS_MAX_SGE, NULL, NULL, 0);
+    if (!ctx->send_cq)
     {
         serverLog(LL_WARNING, "RDMA: ibv create send cq failed");
         return C_ERR;
     }
 
-    recv_cq = ibv_create_cq(ib_context, REDIS_MAX_SGE, NULL, NULL, 0);
-    if (!recv_cq)
+    ctx->recv_cq = ibv_create_cq(ib_context, REDIS_MAX_SGE, NULL, NULL, 0);
+    if (!ctx->recv_cq)
     {
         serverLog(LL_WARNING, "RDMA: ibv create recv cq failed");
         return C_ERR;
     }
-
-    ctx->send_cq = send_cq;
-    ctx->recv_cq = recv_cq;
 
     memset(&init_attr, 0, sizeof(init_attr));
     init_attr.cap.max_send_wr = REDIS_MAX_SGE;
@@ -457,8 +439,8 @@ static int rdmaCreateResource(RdmaContext *ctx, struct rdma_cm_id *cm_id)
     init_attr.cap.max_send_sge = 1;
     init_attr.cap.max_recv_sge = 1;
     init_attr.qp_type = IBV_QPT_RC;
-    init_attr.send_cq = send_cq;
-    init_attr.recv_cq = recv_cq;
+    init_attr.send_cq = ctx->send_cq;
+    init_attr.recv_cq = ctx->recv_cq;
     init_attr.srq = NULL;
 
     cm_id->qp = ibv_create_qp(ctx->pd, &init_attr);
@@ -682,13 +664,6 @@ void connRdmaEventHandler(void *clientData)
     }
 }
 
-// let's not use non-blocking mode for now
-// since we are pulling the events manually anyways
-// if (anetNonBlock(NULL, cm_channel->fd) != C_OK)
-// {
-//     serverLog(LL_WARNING, "RDMA: set cm channel fd non-block failed");
-//     goto out;
-// }
 
 static void connRdmaClose(rdma_connection *rdma_conn)
 {
@@ -726,11 +701,11 @@ static int rdmaServer(char *err, int port, char *bindaddr, int af, int index)
     struct sockaddr_storage sock_addr;
     struct rdma_cm_id *listen_cmid;
 
-    if (ibv_fork_init())
-    {
-        serverLog(LL_WARNING, "RDMA: FATAL error, recv corrupted cmd");
-        return ANET_ERR;
-    }
+    // if (ibv_fork_init())
+    // {
+    //     serverLog(LL_WARNING, "RDMA: FATAL error, recv corrupted cmd");
+    //     return ANET_ERR;
+    // }
 
     snprintf(_port, 6, "%d", port);
     memset(&hints, 0, sizeof(hints));
@@ -777,8 +752,8 @@ static int rdmaServer(char *err, int port, char *bindaddr, int af, int index)
             return ANET_ERR;
         }
 
-        rdma_set_option(listen_cmid, RDMA_OPTION_ID, RDMA_OPTION_ID_AFONLY,
-                        &afonly, sizeof(afonly));
+        // rdma_set_option(listen_cmid, RDMA_OPTION_ID, RDMA_OPTION_ID_AFONLY,
+        //                 &afonly, sizeof(afonly));
 
         if (rdma_bind_addr(listen_cmid, (struct sockaddr *)&sock_addr))
         {
@@ -923,6 +898,8 @@ int main(int argc, char **argv)
             acceptRdmaHandler();
         }
     }
+
+    printf("waiting for messages from the client\n");
 
     while (true)
     {
