@@ -471,10 +471,9 @@ static int redisRdmaConnect(redisContext *c, struct rdma_cm_id *cm_id)
   if (rdmaSetupIoBuf(c, ctx, cm_id) != REDIS_OK)
     goto free_qp;
 
-  ctx->cm_id = cm_id;
   /* rdma connect with param */
-  conn_param.responder_resources = 0;
-  conn_param.initiator_depth = 0;
+  // conn_param.responder_resources = 0;
+  // conn_param.initiator_depth = 0;
   conn_param.qp_num = ctx->cm_id->qp->qp_num;
   printf("RDMA: connecting to %s:%d\n", c->tcp.host, c->tcp.port);
   if (rdma_connect(cm_id, &conn_param))
@@ -542,6 +541,7 @@ static int redisRdmaCM(redisContext *c, int timeout)
       if (timeout < 0 || timeout > 100)
         timeout = 100; /* at most 100ms to resolve route */
       ret = rdma_resolve_route(event->id, timeout);
+      ctx->cm_id = event->id;
       if (ret)
       {
         __redisSetError(c, REDIS_ERR_OTHER, "RDMA: route resolve failed");
@@ -684,7 +684,6 @@ int redisContextConnectRdma(redisContext *c, const char *addr, int port,
     __redisSetError(c, REDIS_ERR_OTHER, "RDMA: create id failed");
     return REDIS_ERR;
   }
-  ctx->cm_id = cm_id;
 
   // note: make it non-blocking
   int flags = fcntl(cm_channel->fd, F_GETFL, 0);

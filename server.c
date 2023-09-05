@@ -145,7 +145,6 @@ typedef struct RdmaContext
 /* Global vars */
 struct redisServer server; /* Server global state */
 static struct rdma_event_channel *listen_channel;
-static struct rdma_cm_id *listen_cmids[CONFIG_BINDADDR_MAX];
 char ib_devname[100];
 
 static size_t rdmaPostSend(RdmaContext *ctx, struct rdma_cm_id *cm_id, const void *data, size_t data_len)
@@ -234,12 +233,6 @@ static void rdmaDestroyIoBuf(RdmaContext *ctx)
     munmap(ctx->send_buf, REDIS_MAX_SGE * REDIS_RDMA_SERVER_TX_SIZE);
     ctx->send_buf = NULL;
 
-    // if (ctx->status_mr)
-    // {
-    //     ibv_dereg_mr(ctx->status_mr);
-    //     ctx->status_mr = NULL;
-    // }
-
     munmap(ctx->send_status, REDIS_MAX_SGE * sizeof(bool));
     ctx->send_status = NULL;
 }
@@ -299,15 +292,6 @@ static int connRdmaHandleSend(RdmaContext *ctx, uint32_t index)
     return C_OK;
 }
 
-static int connRdmaWrite(rdma_connection *rdma_conn, const void *data, size_t data_len)
-{
-    // rdma_connection *rdma_conn = (rdma_connection *)conn;
-    struct rdma_cm_id *cm_id = rdma_conn->cm_id;
-    RdmaContext *ctx = cm_id->context;
-
-    return rdmaPostSend(ctx, cm_id, data, data_len);
-}
-
 static int connRdmaHandleRecv(RdmaContext *ctx, struct rdma_cm_id *cm_id, uint32_t index, uint32_t byte_len)
 {
     assert(byte_len > 0);
@@ -318,7 +302,7 @@ static int connRdmaHandleRecv(RdmaContext *ctx, struct rdma_cm_id *cm_id, uint32
     // just print this info and reply to the client
     printf("received message: %s\n", ctx->recv_buf + ctx->recv_offset);
     char *msg = "hello from server";
-    connRdmaWrite(server.rdma_conn, msg, strlen(msg) + 1);
+    rdmaPostSend(ctx, cm_id, msg, strlen(msg) + 1);
 
     // to replenish the recv buffer
     return rdmaPostRecv(ctx, cm_id, index);
@@ -495,10 +479,12 @@ static int rdmaHandleConnect(char *err, struct rdma_cm_event *ev, char *ip, size
     struct rdma_cm_id *cm_id = ev->id;
     struct sockaddr_storage caddr;
     RdmaContext *ctx = NULL;
-    struct rdma_conn_param conn_param = {
-        .responder_resources = 0,
-        .initiator_depth = 0,
-    };
+    struct rdma_conn_param conn_param = {0};
+
+    // struct rdma_conn_param conn_param = {
+    //     .responder_resources = 0,
+    //     .initiator_depth = 0,
+    // };
 
     memcpy(&caddr, &cm_id->route.addr.dst_addr, sizeof(caddr));
     if (caddr.ss_family == AF_INET)
@@ -767,8 +753,6 @@ static int rdmaServer(char *err, int port, char *bindaddr, int af, int index)
             goto error;
         }
 
-        listen_cmids[index] = listen_cmid;
-        printf("RDMA: server start to listen on %s:%d, with index%d\n", bindaddr, port, index);
         goto end;
     }
 

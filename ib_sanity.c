@@ -137,6 +137,7 @@ static void rdma_cm_server(struct ctx *ctx, const char *servername)
 
 	assert(!rdma_get_cm_event(channel, &event));
 	assert(event->event == RDMA_CM_EVENT_CONNECT_REQUEST);
+	ctx->cm_id = event->id;
 	qp_init(ctx);
 	post_recv(ctx, is_server, 1);
 	conn_param.qp_num = ctx->cm_id->qp->qp_num;
@@ -173,11 +174,14 @@ static void rdma_cm_client(struct ctx *ctx, const char *servername)
 
 	assert(!rdma_get_cm_event(channel, &event));
 	assert(event->event == RDMA_CM_EVENT_ROUTE_RESOLVED);
+	ctx->cm_id = event->id;
 	qp_init(ctx);
 	post_recv(ctx, is_server, 1);
 
-	conn_param.responder_resources = 0;
-	conn_param.initiator_depth = 0;
+	// conn_param.responder_resources = 0;
+	// conn_param.initiator_depth = 0;
+	// conn_param.retry_count = 7;
+	// conn_param.rnr_retry_count = 7;
 	conn_param.qp_num = ctx->cm_id->qp->qp_num;
 	assert(!rdma_connect(ctx->cm_id, &conn_param));
 	assert(!rdma_ack_cm_event(event));
@@ -233,6 +237,8 @@ static void rx(const struct ctx *ctx, int is_server, int id)
 	assert(ne > 0);
 	assert(wc.status == IBV_WC_SUCCESS);
 	assert(wc.wr_id == 0);
+
+	// printf("rx: wc.opcode=%d\n", wc.opcode);
 
 	expected_len = get_len(!is_server, id);
 	assert(wc.byte_len == expected_len);
@@ -296,6 +302,7 @@ static void tx(const struct ctx *ctx, int is_server, int id)
 	} while (!ne);
 	assert(ne > 0);
 	printf("tx: s_wc.status=%d\n", s_wc.status);
+	// printf("rx: wc.opcode=%d\n", s_wc.opcode);
 	assert(s_wc.status == IBV_WC_SUCCESS);
 }
 
