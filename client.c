@@ -406,7 +406,7 @@ static int redisRdmaConnect(redisContext *c, struct rdma_cm_id *cm_id)
 {
   printf("route resolved, creating RDMA structs\n");
   RdmaContext *ctx = (RdmaContext *)c->privctx;
-  struct ibv_cq *send_cq, *recv_cq;
+  // struct ibv_cq *send_cq, *recv_cq;
   struct ibv_qp_init_attr init_attr = {0};
   struct rdma_conn_param conn_param = {0};
 

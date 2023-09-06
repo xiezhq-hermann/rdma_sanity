@@ -513,14 +513,6 @@ static int rdmaHandleConnect(char *err, struct rdma_cm_event *ev, char *ip, size
         goto reject;
     }
 
-    conn_param.qp_num = cm_id->qp->qp_num;
-    ret = rdma_accept(cm_id, &conn_param);
-    if (ret)
-    {
-        serverNetError(err, "RDMA: accept failed");
-        goto free_rdma;
-    }
-
     for (int i = 0; i < REDIS_MAX_SGE; i++)
     {
 
@@ -529,6 +521,14 @@ static int rdmaHandleConnect(char *err, struct rdma_cm_event *ev, char *ip, size
             serverLog(LL_WARNING, "RDMA: post recv failed");
             // goto destroy_iobuf;
         }
+    }
+
+    conn_param.qp_num = cm_id->qp->qp_num;
+    ret = rdma_accept(cm_id, &conn_param);
+    if (ret)
+    {
+        serverNetError(err, "RDMA: accept failed");
+        goto free_rdma;
     }
 
     serverLog(LL_VERBOSE, "RDMA: successful connection from %s:%d\n", ctx->ip, ctx->port);

@@ -30,7 +30,8 @@
 #define PARAM_TRAFFIC_CLASS 0
 #define PARAM_TX_DEPTH 127
 
-struct ctx {
+struct ctx
+{
 	char *send_buf;
 	char *recv_buf;
 	// struct ibv_context *context;
@@ -74,7 +75,7 @@ static void qp_init(struct ctx *ctx)
 
 	flags = IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS;
 
-	assert (!ibv_modify_qp(ctx->cm_id->qp, &attr, flags));
+	assert(!ibv_modify_qp(ctx->cm_id->qp, &attr, flags));
 }
 
 static int get_len(int server_tx, int id)
@@ -114,85 +115,7 @@ static void post_recv(const struct ctx *ctx, int is_server, int id)
 	assert(!ibv_post_recv(ctx->cm_id->qp, &rwr, &bad_wr_recv));
 }
 
-static void rdma_cm_server(struct ctx *ctx, const char *servername)
-{
-	int is_server = 1;
-	struct rdma_cm_event *event;
-	struct rdma_conn_param conn_param = {0};
-	struct rdma_event_channel *channel;
-	struct sockaddr_in addr = {0};
-
-	channel = rdma_create_event_channel();
-	assert(channel);
-
-	assert(!rdma_create_id(channel, &ctx->cm_id, NULL, RDMA_PS_TCP));
-
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons(PARAM_PORT);
-	// note
-	assert(inet_aton(servername, &addr.sin_addr));
-	assert(!rdma_bind_addr(ctx->cm_id, (struct sockaddr *)&addr));
-
-	assert(!rdma_listen(ctx->cm_id, 0));
-
-	assert(!rdma_get_cm_event(channel, &event));
-	assert(event->event == RDMA_CM_EVENT_CONNECT_REQUEST);
-	ctx->cm_id = event->id;
-	qp_init(ctx);
-	post_recv(ctx, is_server, 1);
-	conn_param.qp_num = ctx->cm_id->qp->qp_num;
-	assert(!rdma_accept(event->id, &conn_param));
-	assert(!rdma_ack_cm_event(event));
-
-	assert(!rdma_get_cm_event(channel, &event));
-	assert(event->event == RDMA_CM_EVENT_ESTABLISHED);
-	assert(!rdma_ack_cm_event(event));
-}
-
-static void rdma_cm_client(struct ctx *ctx, const char *servername)
-{
-	int is_server = 0;
-	struct rdma_cm_event *event;
-	struct rdma_conn_param conn_param = {0};
-	struct rdma_event_channel *channel;
-	struct sockaddr_in addr = {0};
-
-	channel = rdma_create_event_channel();
-	assert(channel);
-
-	assert(!rdma_create_id(channel, &ctx->cm_id, NULL, RDMA_PS_TCP));
-
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons(PARAM_PORT);
-	assert(inet_aton(servername, &addr.sin_addr));
-	assert(!rdma_resolve_addr(ctx->cm_id, NULL, (struct sockaddr *)&addr, 2000));
-
-	assert(!rdma_get_cm_event(channel, &event));
-	assert(event->event == RDMA_CM_EVENT_ADDR_RESOLVED);
-	assert(!rdma_resolve_route(ctx->cm_id, 2000));
-	assert(!rdma_ack_cm_event(event));
-
-	assert(!rdma_get_cm_event(channel, &event));
-	assert(event->event == RDMA_CM_EVENT_ROUTE_RESOLVED);
-	ctx->cm_id = event->id;
-	qp_init(ctx);
-	post_recv(ctx, is_server, 1);
-
-	// conn_param.responder_resources = 0;
-	// conn_param.initiator_depth = 0;
-	// conn_param.retry_count = 7;
-	// conn_param.rnr_retry_count = 7;
-	conn_param.qp_num = ctx->cm_id->qp->qp_num;
-	assert(!rdma_connect(ctx->cm_id, &conn_param));
-	assert(!rdma_ack_cm_event(event));
-
-	assert(!rdma_get_cm_event(channel, &event));
-	assert(event->event == RDMA_CM_EVENT_ESTABLISHED);
-	assert(!rdma_ack_cm_event(event));
-}
-
-
-static struct ibv_device* find_ib_device(const char *ib_devname)
+static struct ibv_device *find_ib_device(const char *ib_devname)
 {
 	int num_of_device;
 	struct ibv_device **dev_list;
@@ -206,6 +129,133 @@ static struct ibv_device* find_ib_device(const char *ib_devname)
 	assert(ib_dev);
 	return ib_dev;
 }
+
+static void rdma_cm_server(struct ctx *ctx, const char *servername, const char *ib_devname)
+{
+	int is_server = 1;
+	struct rdma_cm_event *event;
+	struct rdma_conn_param conn_param = {0};
+	struct rdma_event_channel *channel;
+	struct sockaddr_in addr = {0};
+	struct rdma_cm_id *listen_cm_id = NULL;
+
+	channel = rdma_create_event_channel();
+	assert(channel);
+
+	assert(!rdma_create_id(channel, &listen_cm_id, NULL, RDMA_PS_TCP));
+
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(PARAM_PORT);
+	// note
+	assert(inet_aton(servername, &addr.sin_addr));
+	assert(!rdma_bind_addr(listen_cm_id, (struct sockaddr *)&addr));
+	assert(!rdma_listen(listen_cm_id, 0));
+
+	assert(!rdma_get_cm_event(channel, &event));
+	assert(event->event == RDMA_CM_EVENT_CONNECT_REQUEST);
+
+	// rdma create resource
+	struct ibv_device *ib_dev;
+	ib_dev = find_ib_device(ib_devname);
+	struct ibv_context *ib_context;
+	ib_context = ibv_open_device(ib_dev);
+	assert(ib_context);
+	ctx->pd = ibv_alloc_pd(ib_context);
+	assert(ctx->pd);
+	ctx->send_cq = ibv_create_cq(ib_context, PARAM_TX_DEPTH, NULL, NULL, PARAM_EQ_NUM);
+	assert(ctx->send_cq);
+	ctx->recv_cq = ibv_create_cq(ib_context, PARAM_RX_DEPTH, NULL, NULL, PARAM_EQ_NUM);
+	assert(ctx->recv_cq);
+
+	ctx->cm_id = event->id;
+	qp_init(ctx);
+
+	// setup io buffers
+	ctx->send_buf = mmap(NULL, PARAM_MR_LENGTH, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	assert(ctx->send_buf != MAP_FAILED);
+	// ctx->recv_buf = ctx->send_buf + PARAM_MR_LENGTH / 2;
+	ctx->recv_buf = mmap(NULL, PARAM_MR_LENGTH, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	assert(ctx->recv_buf != MAP_FAILED);
+	ctx->send_mr = ibv_reg_mr(ctx->pd, ctx->send_buf, PARAM_MR_LENGTH, IBV_ACCESS_LOCAL_WRITE);
+	ctx->recv_mr = ibv_reg_mr(ctx->pd, ctx->recv_buf, PARAM_MR_LENGTH, IBV_ACCESS_LOCAL_WRITE);
+
+	post_recv(ctx, is_server, 1);
+	conn_param.qp_num = ctx->cm_id->qp->qp_num;
+	assert(!rdma_accept(event->id, &conn_param));
+	assert(!rdma_ack_cm_event(event));
+
+	assert(!rdma_get_cm_event(channel, &event));
+	assert(event->event == RDMA_CM_EVENT_ESTABLISHED);
+	assert(!rdma_ack_cm_event(event));
+}
+
+static void rdma_cm_client(struct ctx *ctx, const char *servername, const char *ib_devname)
+{
+	int is_server = 0;
+	struct rdma_cm_event *event;
+	struct rdma_conn_param conn_param = {0};
+	struct rdma_event_channel *channel;
+	struct sockaddr_in addr = {0};
+	struct rdma_cm_id *conn_cm_id = NULL;
+
+	channel = rdma_create_event_channel();
+	assert(channel);
+
+	assert(!rdma_create_id(channel, &conn_cm_id, NULL, RDMA_PS_TCP));
+
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(PARAM_PORT);
+	assert(inet_aton(servername, &addr.sin_addr));
+	assert(!rdma_resolve_addr(conn_cm_id, NULL, (struct sockaddr *)&addr, 2000));
+
+	assert(!rdma_get_cm_event(channel, &event));
+	assert(event->event == RDMA_CM_EVENT_ADDR_RESOLVED);
+	ctx->cm_id = event->id;
+	assert(!rdma_resolve_route(ctx->cm_id, 2000));
+	assert(!rdma_ack_cm_event(event));
+
+	assert(!rdma_get_cm_event(channel, &event));
+	assert(event->event == RDMA_CM_EVENT_ROUTE_RESOLVED);
+
+	// redis rdma connect
+	struct ibv_device *ib_dev;
+	ib_dev = find_ib_device(ib_devname);
+	struct ibv_context *ib_context;
+	ib_context = ibv_open_device(ib_dev);
+	assert(ib_context);
+	ctx->pd = ibv_alloc_pd(ib_context);
+	assert(ctx->pd);
+	ctx->send_cq = ibv_create_cq(ib_context, PARAM_TX_DEPTH, NULL, NULL, PARAM_EQ_NUM);
+	assert(ctx->send_cq);
+	ctx->recv_cq = ibv_create_cq(ib_context, PARAM_RX_DEPTH, NULL, NULL, PARAM_EQ_NUM);
+	assert(ctx->recv_cq);
+
+	ctx->cm_id = event->id;
+	qp_init(ctx);
+
+	// setup io buffers
+	ctx->send_buf = mmap(NULL, PARAM_MR_LENGTH, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	assert(ctx->send_buf != MAP_FAILED);
+	// ctx->recv_buf = ctx->send_buf + PARAM_MR_LENGTH / 2;
+	ctx->recv_buf = mmap(NULL, PARAM_MR_LENGTH, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	assert(ctx->recv_buf != MAP_FAILED);
+	ctx->send_mr = ibv_reg_mr(ctx->pd, ctx->send_buf, PARAM_MR_LENGTH, IBV_ACCESS_LOCAL_WRITE);
+	ctx->recv_mr = ibv_reg_mr(ctx->pd, ctx->recv_buf, PARAM_MR_LENGTH, IBV_ACCESS_LOCAL_WRITE);
+
+	// conn_param.responder_resources = 0;
+	// conn_param.initiator_depth = 0;
+	// conn_param.retry_count = 7;
+	// conn_param.rnr_retry_count = 7;
+	conn_param.qp_num = ctx->cm_id->qp->qp_num;
+	assert(!rdma_connect(ctx->cm_id, &conn_param));
+	assert(!rdma_ack_cm_event(event));
+
+	assert(!rdma_get_cm_event(channel, &event));
+	assert(event->event == RDMA_CM_EVENT_ESTABLISHED);
+	post_recv(ctx, is_server, 1);
+	assert(!rdma_ack_cm_event(event));
+}
+
 
 static void get_msg(char *msg, int len, int server_tx, int id)
 {
@@ -230,7 +280,8 @@ static void rx(const struct ctx *ctx, int is_server, int id)
 
 	memset(&wc, 0xcc, sizeof(wc));
 	timeout_at = time(NULL) + 10;
-	do {
+	do
+	{
 		ne = ibv_poll_cq(ctx->recv_cq, 1, &wc);
 		assert(time(NULL) < timeout_at);
 	} while (!ne);
@@ -246,10 +297,12 @@ static void rx(const struct ctx *ctx, int is_server, int id)
 	assert(expected_len <= sizeof(expected));
 	get_msg(expected, expected_len, !is_server, id);
 
-	if (memcmp(ctx->recv_buf, expected, expected_len)) {
+	if (memcmp(ctx->recv_buf, expected, expected_len))
+	{
 		len = expected_len;
 		truncated = "";
-		if (len > 100) {
+		if (len > 100)
+		{
 			truncated = "...";
 			len = 100;
 		}
@@ -279,7 +332,6 @@ static void tx(const struct ctx *ctx, int is_server, int id)
 	sge.lkey = ctx->send_mr->lkey;
 	sge.length = len;
 
-
 	// sge_list.addr = (uintptr_t) ctx->send_buf;
 	// sge_list.length = len;
 	// sge_list.lkey = ctx->send_mr->lkey;
@@ -297,7 +349,8 @@ static void tx(const struct ctx *ctx, int is_server, int id)
 	// Prefill with an invalid value to catch ibv_poll_cq if it does not update s_wc.
 	s_wc.status = -1;
 
-	do {
+	do
+	{
 		ne = ibv_poll_cq(ctx->send_cq, 1, &s_wc);
 	} while (!ne);
 	assert(ne > 0);
@@ -314,8 +367,10 @@ static void ping_pong(const struct ctx *ctx, int is_server)
 
 	state = is_server ? 1 : 2;
 
-	for (i = 0; i < payload_length_count * 2; i++) {
-		switch (state) {
+	for (i = 0; i < payload_length_count * 2; i++)
+	{
+		switch (state)
+		{
 		case 1:
 			fprintf(stderr, "waiting to rx: tx_cnt=%d rx_cnt=%d is_server=%d len=%d\n", tx_cnt, rx_cnt, is_server, get_len(!is_server, rx_cnt + 1));
 			rx_cnt++;
@@ -371,7 +426,6 @@ static void init(const char *ib_devname, struct ctx *ctx)
 	// assert(ctx->mr);
 }
 
-
 int main(int argc, char *argv[])
 {
 	const char *ib_devname;
@@ -383,7 +437,8 @@ int main(int argc, char *argv[])
 	struct ctx ctx = {0};
 	// struct ibv_port_attr port_attr;
 
-	if (argc != 6) {
+	if (argc != 6)
+	{
 		fprintf(stderr, "Usage: %s [server|client] payloads server_ip ib_devname rdma_cm\n", argv[0]);
 		return 1;
 	}
@@ -394,16 +449,22 @@ int main(int argc, char *argv[])
 	ib_devname = argv[4];
 	rdma_cm = atoi(argv[5]);
 
-	if (!strcmp(type, "server")) {
+	if (!strcmp(type, "server"))
+	{
 		is_server = 1;
-	} else if (!strcmp(type, "client")) {
+	}
+	else if (!strcmp(type, "client"))
+	{
 		is_server = 0;
-	} else {
+	}
+	else
+	{
 		assert(0);
 	}
 
 	token = strtok(payloads, ",");
-	while (token) {
+	while (token)
+	{
 		payload_lengths = realloc(payload_lengths, (payload_length_count + 1) * sizeof(payload_lengths[0]));
 		payload_lengths[payload_length_count] = atoi(token);
 		assert(payload_lengths[payload_length_count] > 0);
@@ -411,17 +472,20 @@ int main(int argc, char *argv[])
 		token = strtok(NULL, ",");
 	}
 
-	init(ib_devname, &ctx);
+	// init(ib_devname, &ctx);
 
 	// assert(!ibv_query_port(ctx.context, PARAM_PORT_NUM, &port_attr));
 	// assert(port_attr.state == IBV_PORT_ACTIVE);
 
-	if (rdma_cm) {
+	if (rdma_cm)
+	{
 		if (is_server)
-			rdma_cm_server(&ctx, servername);
+			rdma_cm_server(&ctx, servername, ib_devname);
 		else
-			rdma_cm_client(&ctx, servername);
-	} else {
+			rdma_cm_client(&ctx, servername, ib_devname);
+	}
+	else
+	{
 		// pass
 	}
 
